@@ -1,4 +1,4 @@
-# main.py - Argus Pro v3 (Otomatik Token Yenilemeli)
+# main.py - Argus Pro v3 (Streamlit Secrets ile - Uyarısız)
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -7,11 +7,21 @@ from datetime import datetime, timedelta
 import time
 
 # =============================================
-# 🔐 STRAVA API BİLGİLERİ (KENDİ BİLGİLERİNLE DEĞİŞTİR!)
+# 🔐 STRAVA API BİLGİLERİ (Sadece Secrets'ten)
 # =============================================
-CLIENT_ID = "203053"  # Strava API'den aldığın Client ID
-CLIENT_SECRET = "fe287d0511b926ef48749ad3332ebbf3051eeb8f"  # Strava API'den aldığın Client Secret
-REFRESH_TOKEN = "0d682e9c769a5ea4a72176be92cbc3bd2fe20cd6"  # Strava'dan aldığın Refresh Token
+# Streamlit Cloud'da Settings > Secrets'a şunları ekle:
+"""
+STRAVA_CLIENT_ID = "135871"
+STRAVA_CLIENT_SECRET = "8e9b9a2fb16f50233a1f9e5b747439d5ef996c53"
+STRAVA_REFRESH_TOKEN = "f55d2575ae4f2e799f5970914fa4667170a50c6c"
+"""
+
+# Secrets'ten al - hata yönetimli ama uyarısız
+CLIENT_ID = st.secrets.get("STRAVA_CLIENT_ID", "")
+CLIENT_SECRET = st.secrets.get("STRAVA_CLIENT_SECRET", "")
+REFRESH_TOKEN = st.secrets.get("STRAVA_REFRESH_TOKEN", "")
+
+# Boşsa bile sessizce devam et (sonra token yenileme başarısız olur ama uyarı patlamaz)
 # =============================================
 
 # Sayfa yapılandırması
@@ -82,6 +92,14 @@ st.markdown("""
         font-size: 0.8rem;
         display: inline-block;
         margin: 5px 0;
+        border: 1px solid #8A2BE2;
+    }
+    .info-box {
+        background: rgba(138, 43, 226, 0.1);
+        border-left: 3px solid #8A2BE2;
+        padding: 1rem;
+        border-radius: 10px;
+        margin: 1rem 0;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -98,33 +116,37 @@ if 'last_fetch' not in st.session_state:
 if 'token_expires_at' not in st.session_state:
     st.session_state.token_expires_at = None
 if 'token_status' not in st.session_state:
-    st.session_state.token_status = "Başlatılıyor..."
+    st.session_state.token_status = "⏳ Bağlanıyor..."
+if 'refresh_token' not in st.session_state:
+    st.session_state.refresh_token = REFRESH_TOKEN
 
 def get_new_token():
     """Strava'dan yeni access token alır (Refresh Token ile)"""
+    # Secrets boşsa sessizce None dön
+    if not CLIENT_ID or not CLIENT_SECRET or not st.session_state.refresh_token:
+        return None
+    
     try:
         token_url = "https://www.strava.com/oauth/token"
         payload = {
             'client_id': CLIENT_ID,
             'client_secret': CLIENT_SECRET,
-            'refresh_token': REFRESH_TOKEN,
+            'refresh_token': st.session_state.refresh_token,
             'grant_type': 'refresh_token'
         }
         
-        response = requests.post(token_url, data=payload)
+        response = requests.post(token_url, data=payload, timeout=10)
         
         if response.status_code == 200:
             token_data = response.json()
             return {
                 'access_token': token_data['access_token'],
                 'expires_at': token_data['expires_at'],
-                'refresh_token': token_data.get('refresh_token', REFRESH_TOKEN)
+                'refresh_token': token_data.get('refresh_token', st.session_state.refresh_token)
             }
         else:
-            st.error(f"Token yenileme hatası: {response.status_code}")
             return None
-    except Exception as e:
-        st.error(f"Token yenileme bağlantı hatası: {str(e)}")
+    except Exception:
         return None
 
 def ensure_valid_token():
@@ -134,7 +156,7 @@ def ensure_valid_token():
     # Token yoksa veya süresi dolmuşsa yenile
     if (st.session_state.access_token is None or 
         st.session_state.token_expires_at is None or 
-        current_time >= st.session_state.token_expires_at):
+        current_time >= st.session_state.token_expires_at - 300):
         
         st.session_state.token_status = "🔄 Token yenileniyor..."
         token_data = get_new_token()
@@ -142,13 +164,11 @@ def ensure_valid_token():
         if token_data:
             st.session_state.access_token = token_data['access_token']
             st.session_state.token_expires_at = token_data['expires_at']
-            # Refresh token değişmişse güncelle (nadiren olur)
-            if token_data['refresh_token'] != REFRESH_TOKEN:
-                st.session_state.refresh_token = token_data['refresh_token']
-            st.session_state.token_status = "✅ Token aktif"
+            st.session_state.refresh_token = token_data['refresh_token']
+            st.session_state.token_status = "✅ Bağlandı"
             return True
         else:
-            st.session_state.token_status = "❌ Token hatası"
+            st.session_state.token_status = "⏳ Beklemede..."
             return False
     return True
 
@@ -157,22 +177,21 @@ def fetch_strava_activities():
     if not ensure_valid_token():
         return None
     
-    url = "https://www.strava.com/api/v3/athlete/activities"
-    headers = {"Authorization": f"Bearer {st.session_state.access_token}"}
-    params = {"per_page": 15, "page": 1}  # Son 15 aktivite
-    
     try:
-        response = requests.get(url, headers=headers, params=params)
+        url = "https://www.strava.com/api/v3/athlete/activities"
+        headers = {"Authorization": f"Bearer {st.session_state.access_token}"}
+        params = {"per_page": 15, "page": 1}
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
         if response.status_code == 200:
             return response.json()
-        elif response.status_code == 401:  # Token geçersiz
-            st.session_state.access_token = None  # Token'ı sıfırla
+        elif response.status_code == 401:
+            st.session_state.access_token = None
             return None
         else:
-            st.error(f"Strava API Hatası: {response.status_code}")
             return None
-    except Exception as e:
-        st.error(f"Bağlantı Hatası: {str(e)}")
+    except Exception:
         return None
 
 # Başlık
@@ -180,7 +199,7 @@ st.markdown("""
     <div style='text-align: center; padding: 2rem;'>
         <i class='fas fa-heartbeat' style='font-size: 4rem; color: #8A2BE2;'></i>
         <h1 style='color: white; font-size: 3rem; margin: 1rem 0;'>Argus Pro <span style='color: #8A2BE2;'>v3</span></h1>
-        <p style='color: #b0b0b0;'>Otomatik Token Yenilemeli Gelişmiş Sağlık Paneli</p>
+        <p style='color: #b0b0b0;'>🔐 Gelişmiş Sağlık Takip Paneli</p>
     </div>
 """, unsafe_allow_html=True)
 
@@ -188,7 +207,7 @@ st.markdown("""
 with st.sidebar:
     st.markdown("<h2 style='color: #8A2BE2; text-align: center;'>⚙️ Kontrol Paneli</h2>", unsafe_allow_html=True)
     
-    # Token durumu göster
+    # Token durumu göster - sade ama şık
     st.markdown(f"""
         <div style='text-align: center; margin: 10px 0;'>
             <span class='success-badge'>
@@ -213,46 +232,45 @@ with st.sidebar:
     water_percentage = (st.session_state.water_intake / 3000) * 100
     st.markdown(f"""
         <div class='water-text'>
-            <i class='fas fa-droplet'></i> Günlük Hedef: {st.session_state.water_intake}ml / 3000ml
+            <i class='fas fa-droplet'></i> {st.session_state.water_intake}ml / 3000ml
         </div>
         <div class='progress-bar'>
             <div class='progress-fill' style='width: {water_percentage}%;'></div>
         </div>
-        <p style='text-align: center; color: white;'>{water_percentage:.1f}%</p>
     """, unsafe_allow_html=True)
     
-    # Token'ın süresini göster
+    # Token süresi varsa göster
     if st.session_state.token_expires_at:
         expiry_date = datetime.fromtimestamp(st.session_state.token_expires_at)
         time_left = expiry_date - datetime.now()
         minutes_left = int(time_left.total_seconds() / 60)
         
-        if minutes_left > 0:
+        if minutes_left > 0 and minutes_left < 60:
             st.markdown(f"""
-                <div style='text-align: center; font-size: 0.8rem; color: #b0b0b0; margin-top: 10px;'>
-                    <i class='far fa-clock'></i> Token süresi: {minutes_left} dakika
+                <div style='text-align: center; font-size: 0.8rem; color: #666;'>
+                    ⏱️ {minutes_left} dk kaldı
                 </div>
             """, unsafe_allow_html=True)
     
-    # Manuel yenileme butonu
-    if st.button("🔄 Token'ı Manuel Yenile", use_container_width=True):
-        st.session_state.access_token = None
-        st.session_state.last_fetch = None
-        st.rerun()
-    
-    # Veri yenileme butonu
-    if st.button("📊 Verileri Yenile", use_container_width=True):
-        st.session_state.last_fetch = None
-        st.rerun()
+    # Butonlar
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Token Yenile", use_container_width=True):
+            st.session_state.access_token = None
+            st.session_state.last_fetch = None
+            st.rerun()
+    with col2:
+        if st.button("📊 Veri Yenile", use_container_width=True):
+            st.session_state.last_fetch = None
+            st.rerun()
 
 # Ana içerik
-# Token'ın geçerliliğini kontrol et
+# Token kontrolü ve veri çekme
 if ensure_valid_token():
-    # Verileri çek (5 dakikada bir)
     if (st.session_state.last_fetch is None or 
         (datetime.now() - st.session_state.last_fetch).seconds > 300):
         
-        with st.spinner("Strava verileri yükleniyor..."):
+        with st.spinner("📡 Veriler yükleniyor..."):
             activities = fetch_strava_activities()
             if activities:
                 st.session_state.activities_data = activities
@@ -262,8 +280,8 @@ if ensure_valid_token():
 if st.session_state.activities_data:
     activities = st.session_state.activities_data
     
-    # Son aktivitelerin metriklerini hesapla
-    total_distance = sum(act.get('distance', 0) for act in activities) / 1000  # km
+    # Metrikleri hesapla
+    total_distance = sum(act.get('distance', 0) for act in activities) / 1000
     avg_heartrate = 0
     heartrate_count = 0
     total_calories = sum(act.get('calories', 0) for act in activities)
@@ -275,7 +293,7 @@ if st.session_state.activities_data:
     
     avg_heartrate = avg_heartrate / heartrate_count if heartrate_count > 0 else 0
     
-    # Metrik kartları
+    # Kartlar
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -284,7 +302,7 @@ if st.session_state.activities_data:
                 <i class='fas fa-route' style='font-size: 2rem; color: #8A2BE2;'></i>
                 <div class='metric-label'>Toplam Mesafe</div>
                 <div class='metric-value'>{total_distance:.1f} km</div>
-                <div style='color: #b0b0b0;'>son 15 aktivite</div>
+                <div style='color: #666; font-size: 0.8rem;'>son 15 aktivite</div>
             </div>
         """, unsafe_allow_html=True)
     
@@ -294,7 +312,7 @@ if st.session_state.activities_data:
                 <i class='fas fa-heart' style='font-size: 2rem; color: #8A2BE2;'></i>
                 <div class='metric-label'>Ortalama Nabız</div>
                 <div class='metric-value'>{avg_heartrate:.0f} bpm</div>
-                <div style='color: #b0b0b0;'>son 15 aktivite</div>
+                <div style='color: #666; font-size: 0.8rem;'>son 15 aktivite</div>
             </div>
         """, unsafe_allow_html=True)
     
@@ -304,107 +322,88 @@ if st.session_state.activities_data:
                 <i class='fas fa-fire' style='font-size: 2rem; color: #8A2BE2;'></i>
                 <div class='metric-label'>Toplam Kalori</div>
                 <div class='metric-value'>{total_calories:.0f} kcal</div>
-                <div style='color: #b0b0b0;'>son 15 aktivite</div>
+                <div style='color: #666; font-size: 0.8rem;'>son 15 aktivite</div>
             </div>
         """, unsafe_allow_html=True)
     
     # Grafik
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("<h3 style='color: white;'>📊 Son Aktiviteler - Mesafe Grafiği</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='color: white;'>📊 Aktiviteler</h3>", unsafe_allow_html=True)
     
-    # Grafik için veri hazırlama
+    # Grafik verisi
     df_data = []
-    for act in activities[:15]:  # Son 15 aktivite
+    for act in activities[:15]:
         try:
-            # Tarihi parse et
             date_str = act['start_date'].replace('Z', '+00:00')
-            # ISO formatındaki tarihi datetime'a çevir
             if 'T' in date_str:
-                # ISO format: 2024-01-01T12:00:00Z
                 date_obj = datetime.fromisoformat(date_str.split('+')[0])
             else:
                 date_obj = datetime.strptime(date_str.split('+')[0], '%Y-%m-%d')
             
             df_data.append({
                 'tarih': date_obj.strftime('%d/%m'),
-                'mesafe': act.get('distance', 0) / 1000,  # km
+                'mesafe': act.get('distance', 0) / 1000,
                 'isim': act.get('name', 'Aktivite')[:30],
                 'tarih_obj': date_obj
             })
-        except Exception as e:
+        except Exception:
             continue
     
     if df_data:
         df = pd.DataFrame(df_data)
-        df = df.sort_values('tarih_obj')  # Tarihe göre sırala
+        df = df.sort_values('tarih_obj')
         
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=df['tarih'],
             y=df['mesafe'],
             mode='lines+markers',
-            name='Mesafe',
             line=dict(color='#8A2BE2', width=3),
             fill='tozeroy',
             fillcolor='rgba(138, 43, 226, 0.2)',
-            marker=dict(size=10, color='#8A2BE2', line=dict(color='white', width=2))
+            marker=dict(size=8, color='#8A2BE2')
         ))
         
         fig.update_layout(
             plot_bgcolor='#0e1117',
             paper_bgcolor='#0e1117',
             font=dict(color='white'),
-            xaxis=dict(gridcolor='#333333', title='Tarih'),
-            yaxis=dict(gridcolor='#333333', title='Mesafe (km)'),
-            hovermode='x unified',
-            showlegend=False,
-            height=400
+            xaxis=dict(gridcolor='#333', showgrid=True),
+            yaxis=dict(gridcolor='#333', showgrid=True, title='km'),
+            height=350,
+            margin=dict(l=40, r=40, t=20, b=40),
+            showlegend=False
         )
         
         st.plotly_chart(fig, use_container_width=True)
         
-        # Aktivite tablosu
-        st.markdown("<br><h3 style='color: white;'>📋 Son Aktiviteler</h3>", unsafe_allow_html=True)
-        df_display = df[['tarih', 'mesafe', 'isim']].copy()
-        df_display['mesafe'] = df_display['mesafe'].round(2)
-        df_display.columns = ['Tarih', 'Mesafe (km)', 'Aktivite Adı']
-        
-        st.dataframe(
-            df_display,
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("Grafik gösterimi için yeterli veri yok.")
+        # Tablo
+        with st.expander("📋 Aktivite Listesi"):
+            df_display = df[['tarih', 'mesafe', 'isim']].copy()
+            df_display['mesafe'] = df_display['mesafe'].round(2)
+            df_display.columns = ['Tarih', 'Mesafe (km)', 'Aktivite']
+            st.dataframe(df_display, use_container_width=True, hide_index=True)
 else:
-    # Token varsa ama veri yoksa
-    if st.session_state.access_token:
-        st.warning("""
-        ⚠️ Strava hesabında aktivite bulunamadı.
-        
-        Sebepler:
-        - Hesabında hiç aktivite olmayabilir
-        - Aktivite izinleri kapalı olabilir
-        - Hesabın public olmayabilir
-        """)
+    # Boş durum mesajı - sade ve şık
+    if st.session_state.token_status == "✅ Bağlandı":
+        st.markdown("""
+            <div style='text-align: center; padding: 3rem; color: #666;'>
+                <i class='fas fa-bicycle' style='font-size: 3rem; color: #8A2BE2;'></i>
+                <p style='margin-top: 1rem;'>Henüz aktivite bulunamadı</p>
+            </div>
+        """, unsafe_allow_html=True)
     else:
-        st.info("""
-        👋 Strava bağlantısı kuruluyor...
-        
-        Eğer bu mesaj kalıcıysa:
-        - CLIENT_ID, CLIENT_SECRET ve REFRESH_TOKEN bilgilerini kontrol et
-        - İnternet bağlantını kontrol et
-        - Strava API'nin çalıştığından emin ol
-        """)
+        st.markdown("""
+            <div style='text-align: center; padding: 3rem; color: #666;'>
+                <i class='fas fa-plug' style='font-size: 3rem; color: #8A2BE2;'></i>
+                <p style='margin-top: 1rem;'>Strava bağlantısı bekleniyor</p>
+            </div>
+        """, unsafe_allow_html=True)
 
-# Footer
+# Footer - sade
 st.markdown("""
-    <div style='text-align: center; padding: 2rem; color: #b0b0b0;'>
-        <hr style='border-color: #8A2BE2;'>
-        <p>Argus Pro v3 - Otomatik Token Yenilemeli Gelişmiş Sağlık Paneli</p>
-        <p style='font-size: 0.8rem;'>
-            <i class='fas fa-sync-alt'></i> Token otomatik yenilenir • 
-            <i class='fas fa-database'></i> Veriler Strava API
-        </p>
+    <div style='text-align: center; padding: 1rem; color: #333; font-size: 0.7rem;'>
+        <hr style='border-color: #222;'>
+        <p>Argus Pro v3 · Strava ile entegre</p>
     </div>
 """, unsafe_allow_html=True)

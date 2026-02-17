@@ -15,7 +15,9 @@ st.set_page_config(
 # -------------------- ÖZEL CSS --------------------
 st.markdown("""
 <style>
-    .stApp { background: #0A0A0F; }
+    .stApp { 
+        background: #0A0A0F; 
+    }
     .stat-card {
         background: rgba(20, 20, 30, 0.95);
         border: 1px solid rgba(138, 43, 226, 0.15);
@@ -70,7 +72,9 @@ def get_token():
             'refresh_token': st.secrets["STRAVA_REFRESH_TOKEN"],
             'grant_type': 'refresh_token'
         })
-        return r.json()['access_token'] if r.status_code == 200 else None
+        if r.status_code == 200:
+            return r.json()['access_token']
+        return None
     except:
         return None
 
@@ -84,7 +88,9 @@ def get_activities():
             headers={"Authorization": f"Bearer {st.session_state.token}"},
             params={"per_page": 20}
         )
-        return r.json() if r.status_code == 200 else None
+        if r.status_code == 200:
+            return r.json()
+        return None
     except:
         return None
 
@@ -185,3 +191,5 @@ if st.session_state.activities:
             showlegend=False
         )
         st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("Connect Strava to view your activities")
